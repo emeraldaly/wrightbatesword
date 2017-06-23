@@ -2,6 +2,7 @@ var express = require('express');
 var app = express();
 var bodyParser = require('body-parser');
 var logger= require('morgan');
+var React = require('react');
 
 var PORT = process.env.PORT || 8000;
 
