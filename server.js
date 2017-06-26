@@ -1,12 +1,16 @@
 
-var express = require('express');
-var app = express();
-var bodyParser = require('body-parser');
-var logger= require('morgan');
-var React = require('react');
+const express = require('express');
+const app = express();
+const bodyParser = require('body-parser');
+const logger= require('morgan');
 
-var PORT = process.env.PORT || 8000;
 
+const PORT = process.env.PORT || 8000;
+
+
+app.get('/', function (req, res) {
+  res.send('Hello World!')
+})
 
 app.use(logger('dev'));
 app.use(express.static(__dirname + "/public"));
