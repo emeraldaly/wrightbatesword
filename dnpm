@@ -1,0 +1,145 @@
+#!/usr/bin/env bash
+set -o errexit
+
+SCRIPTNAME="$(basename -- "${BASH_SOURCE[0]}")"
+
+IMAGE="mhart/alpine-node"
+ENTRYPOINT="sh"
+HOMEDIR="/root"
+
+checkarg() {
+  if [ $# -lt 2 ]; then
+    echo "missing argument for option $1" >&2
+    echo "use \"${SCRIPTNAME} --help\" to get help"
+    exit 1
+  fi
+}
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -h|--home)
+      checkarg $1 $2
+      HOMEDIR="$2"
+      shift
+      ;;
+    -i|--image)
+      checkarg $1 $2
+      IMAGE="$2"
+      shift
+      ;;
+    -s|--ssh)
+      checkarg $1 $2
+      SSHVOLUME="$2"
+      shift
+      ;;
+    -w|--workdir)
+      checkarg $1 $2
+      WORKDIR="$(cd "$2" && pwd)"
+      shift
+      ;;
+    --help)
+      cat <<-EOT
+Usage: ${SCRIPTNAME} [OPTION...] [--] ARG...
+
+Arguments are all passed as commands to a posix bourne shell.
+
+Valid options:
+  -h|--home <path>       : path to mount the user's home directory in the container (current: ${HOMEDIR})
+  -i|--image <image>     : image to create the docker container (current: ${IMAGE})
+  -s|--ssh <volname>     : volume name containing the ssh-agent auth socket (current: ${SSHVOLUME:-<undefined>})
+  -w|--workdir <path>    : path to be mounted as the container working directory (mandatory, current: ${PACKAGE:-<undefined>})
+  --help                 : display this help page with current settings
+
+WARNING: The image is executed in a privileged container, _understand_ its Dockerfile before using it.
+
+See https://github.com/whilp/ssh-agent for details about providing an ssh-agent container.
+
+Image prerequisite: user with administration rights (mount and so on)
+EOT
+      exit 0
+      ;;
+    --)
+      shift
+      break
+      ;;
+    *)
+      break
+      ;;
+  esac
+  shift
+done
+
+if [ -z "${WORKDIR}" ]; then
+  echo "workdir option is mandatory"
+  echo "use ${SCRIPTNAME} --help to get help"
+  exit 1
+fi
+
+# realpath is not always available
+realpath() {
+ local rpath="$(cd -P -- "$(dirname -- "$1")" && pwd -P)/$(basename -- "$1")"
+
+ while [[ -h "${rapth}" ]]; do
+   local link=$(readlink "${rpath}")
+   rpath=$(cd "$(dirname -- "${rpath}")" && cd "$(dirname -- "${link}")" && pwd)/$(basename -- "${link}")
+ done
+
+ echo "${rpath}"
+}
+
+clean() {
+  rm -f "${ENTRYPOINT}"
+}
+ENTRYPOINT="$(mktemp)"
+trap clean EXIT
+chmod u+x "${ENTRYPOINT}"
+
+# node-gyp does not provide a way to change its cache directory through npm
+# so the workaround for now is to use a bind mount and ensure the mount point is available
+mkdir -p "${HOME}/.node-gyp"
+
+cat > "${ENTRYPOINT}" <<EOS
+#!/usr/bin/env sh
+set -e
+
+# ensure the ssh credentials are owned by the current user
+if [ -d "\${HOME}/.ssh" ]; then
+  SSH="\$(mktemp -d)"
+  cp -R "\${HOME}/.ssh" "\${SSH}"
+  chown -R "\$(whoami):" "\${SSH}/.ssh"
+  mount -o bind "\${SSH}/.ssh" "\${HOME}/.ssh"
+fi
+
+if [ -d "\${HOME}/.node-gyp" ]; then
+  GYP="\$(mktemp -d)"
+  mount -o bind "\${GYP}" "\${HOME}/.node-gyp"
+fi
+
+cd /work
+while [ \$# -gt 0 ]; do
+  eval "\$1"
+  shift
+done
+
+# ensure owner/group is consistent across /work directory
+chown -R "\$(stat -c "%u:%g" /work)" /work
+EOS
+
+docker run --rm --privileged \
+  -v "$(realpath "${HOME}"):${HOMEDIR}:ro" \
+  -v "$(realpath "${WORKDIR}"):/work" \
+  -v "$(realpath "${ENTRYPOINT}"):/entrypoint" \
+  ${SSHVOLUME:+-v "${SSHVOLUME}:/ssh" -e SSH_AUTH_SOCK=/ssh/auth/sock} \
+  $(env | grep -i "^npm_config_" | awk -F'=' '{ printf "-e " $1 "=\"" $2 "\" " }') \
+  $(env | grep -i "^bower_" | awk -F'=' '{ printf "-e " $1 "=\"" $2 "\" " }') \
+  -e XDG_CONFIG_HOME=/tmp/xdg-config \
+  -e XDG_DATA_HOME=/tmp/xdg-data \
+  -e bower_storage__packages=/tmp/bower-packages \
+  -e bower_storage__registry=/tmp/bower-registry \
+  -e bower_storage__links=/tmp/bower-links \
+  -e bower_allow_root=true \
+  -e npm_config_cache=/tmp/npm-cache \
+  -e npm_config_unsafe_perm=true \
+  --workdir /work \
+  --entrypoint "/entrypoint" \
+  "${IMAGE}" "$@"
